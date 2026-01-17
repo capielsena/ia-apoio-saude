@@ -1,0 +1,137 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>IA de Apoio Operacional e Assistencial</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        .chat-container { height: calc(100vh - 200px); }
+    </style>
+</head>
+<body class="bg-gray-100 font-sans">
+    <div class="max-w-4xl mx-auto p-4">
+        <header class="flex justify-between items-center mb-6 bg-white p-4 rounded-lg shadow">
+            <h1 class="text-2xl font-bold text-blue-600">IA Operacional & Assistencial</h1>
+            <div class="flex items-center gap-4">
+                <select id="userType" class="border p-2 rounded">
+                    <option value="equipe">Equipe (Consulta)</option>
+                    <option value="master">Master (Admin)</option>
+                </select>
+            </div>
+        </header>
+
+        <div id="masterPanel" class="hidden mb-6 bg-blue-50 p-4 rounded-lg border border-blue-200">
+            <h2 class="font-bold mb-2">Painel Master: Atualizar Conhecimento</h2>
+            <div class="flex flex-col gap-3">
+                <textarea id="knowledgeText" class="w-full p-2 border rounded" placeholder="Digite novas regras ou informações aqui..."></textarea>
+                <button onclick="uploadText()" class="bg-blue-600 text-white px-4 py-2 rounded hover:bg-blue-700">Adicionar Texto</button>
+                <div class="border-t pt-2">
+                    <input type="file" id="pdfFile" accept=".pdf" class="mb-2">
+                    <button onclick="uploadPDF()" class="bg-green-600 text-white px-4 py-2 rounded hover:bg-green-700">Upload PDF</button>
+                </div>
+            </div>
+        </div>
+
+        <div class="bg-white rounded-lg shadow flex flex-col">
+            <div id="chatBox" class="chat-container overflow-y-auto p-4 flex flex-col gap-4">
+                <div class="bg-gray-200 p-3 rounded-lg self-start max-w-[80%]">
+                    Olá! Sou sua assistente de apoio operacional e assistencial. Como posso ajudar hoje?
+                </div>
+            </div>
+            <div class="p-4 border-t flex gap-2">
+                <input type="text" id="userInput" class="flex-1 border p-2 rounded" placeholder="Digite sua dúvida sobre protocolos ou agendamentos...">
+                <button onclick="sendMessage()" class="bg-blue-600 text-white px-6 py-2 rounded hover:bg-blue-700">Enviar</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const API_URL = ''; // No Render, o frontend e backend podem rodar no mesmo domínio ou via proxy
+        const userTypeSelect = document.getElementById('userType');
+        const masterPanel = document.getElementById('masterPanel');
+        const chatBox = document.getElementById('chatBox');
+        const userInput = document.getElementById('userInput');
+
+        userTypeSelect.addEventListener('change', () => {
+            masterPanel.classList.toggle('hidden', userTypeSelect.value !== 'master');
+        });
+
+        function appendMessage(text, isUser) {
+            const div = document.createElement('div');
+            div.className = isUser 
+                ? 'bg-blue-600 text-white p-3 rounded-lg self-end max-w-[80%]' 
+                : 'bg-gray-200 p-3 rounded-lg self-start max-w-[80%]';
+            div.innerText = text;
+            chatBox.appendChild(div);
+            chatBox.scrollTop = chatBox.scrollHeight;
+        }
+
+        async function sendMessage() {
+            const text = userInput.value.trim();
+            if (!text) return;
+
+            appendMessage(text, true);
+            userInput.value = '';
+
+            try {
+                const response = await fetch(`${API_URL}/chat`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ message: text, user_type: userTypeSelect.value })
+                });
+                const data = await response.json();
+                appendMessage(data.response, false);
+            } catch (error) {
+                appendMessage('Erro ao conectar com o servidor.', false);
+            }
+        }
+
+        async function uploadText() {
+            const text = document.getElementById('knowledgeText').value.trim();
+            if (!text) return alert('Digite algum texto.');
+
+            const formData = new FormData();
+            formData.append('text', text);
+            formData.append('user_type', 'master');
+
+            try {
+                const response = await fetch(`${API_URL}/upload-text`, {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await response.json();
+                alert(data.message);
+                document.getElementById('knowledgeText').value = '';
+            } catch (error) {
+                alert('Erro ao enviar texto.');
+            }
+        }
+
+        async function uploadPDF() {
+            const fileInput = document.getElementById('pdfFile');
+            if (!fileInput.files[0]) return alert('Selecione um PDF.');
+
+            const formData = new FormData();
+            formData.append('file', fileInput.files[0]);
+            formData.append('user_type', 'master');
+
+            try {
+                const response = await fetch(`${API_URL}/upload-pdf`, {
+                    method: 'POST',
+                    body: formData
+                });
+                const data = await response.json();
+                alert(data.message);
+                fileInput.value = '';
+            } catch (error) {
+                alert('Erro ao enviar PDF.');
+            }
+        }
+
+        userInput.addEventListener('keypress', (e) => {
+            if (e.key === 'Enter') sendMessage();
+        });
+    </script>
+</body>
+</html>
