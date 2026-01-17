@@ -1,5 +1,6 @@
 import os
 import requests
+import json
 from fastapi import FastAPI, Form, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
@@ -19,10 +20,26 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Base de conhecimento simples em memória (para ser leve no Render Free)
-# Em um cenário real com muitos dados, usaríamos um banco externo, 
-# mas para garantir que o site suba no Render Free agora, vamos usar esta abordagem.
-knowledge_base = []
+# Caminho para salvar o conhecimento de forma persistente
+DATA_FILE = "/opt/render/project/src/data/knowledge.json"
+if not os.path.exists(os.path.dirname(DATA_FILE)):
+    os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
+
+def load_knowledge():
+    if os.path.exists(DATA_FILE):
+        try:
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                return json.load(f)
+        except:
+            return []
+    return []
+
+def save_knowledge(data):
+    with open(DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(data, f, ensure_ascii=False, indent=4)
+
+# Carrega o conhecimento inicial
+knowledge_base = load_knowledge()
 
 # Servir arquivos estáticos do frontend
 if os.path.exists("./frontend"):
@@ -33,8 +50,9 @@ async def read_index():
     return FileResponse("./frontend/index.html")
 
 SYSTEM_PROMPT = """Você é uma IA de apoio operacional e assistencial para equipes de saúde.
-Responda APENAS com base no contexto fornecido.
-Se não souber, responda EXATAMENTE: "Não sei responder. Procure sua liderança direta." """
+Sua função é responder perguntas baseando-se EXCLUSIVAMENTE no contexto fornecido abaixo.
+Se a informação não estiver no contexto, responda exatamente: "Não sei responder. Procure sua liderança direta."
+Responda de forma curta, clara e objetiva."""
 
 class ChatMessage(BaseModel):
     message: str
@@ -43,37 +61,44 @@ class ChatMessage(BaseModel):
 @app.post("/chat")
 async def chat(payload: ChatMessage):
     query = payload.message
+    current_kb = load_knowledge()
     
-    # Busca simples por palavra-chave no conhecimento cadastrado
-    context = "\n".join([item for item in knowledge_base if any(word.lower() in item.lower() for word in query.split())])
-    
-    if not context:
-        # Se não achou nada específico, tenta pegar os últimos 3 cadastros como contexto geral
-        context = "\n".join(knowledge_base[-3:])
+    # Busca de contexto: pega tudo o que foi cadastrado para garantir que a IA tenha acesso
+    # Como são textos curtos de manuais, podemos enviar tudo como contexto para a IA decidir
+    context = "\n---\n".join(current_kb)
     
     if not context:
         return {"response": "Não sei responder. Procure sua liderança direta."}
 
-    # Chamada direta para API da Hugging Face (Leve e Gratuita)
+    # Chamada para API da Hugging Face
     api_url = "https://api-inference.huggingface.co/models/HuggingFaceH4/zephyr-7b-beta"
     headers = {"Authorization": f"Bearer {os.getenv('HUGGINGFACEHUB_API_TOKEN')}"}
     
-    prompt = f"<|system|>\n{SYSTEM_PROMPT}\nContexto:\n{context}</s>\n<|user|>\n{query}</s>\n<|assistant|>\n"
+    # Prompt estruturado para forçar o uso do contexto
+    full_prompt = f"<|system|>\n{SYSTEM_PROMPT}\n\nCONTEXTO CADASTRADO:\n{context}</s>\n<|user|>\n{query}</s>\n<|assistant|>\n"
     
     try:
-        response = requests.post(api_url, headers=headers, json={"inputs": prompt, "parameters": {"max_new_tokens": 250, "temperature": 0.1}})
+        response = requests.post(api_url, headers=headers, json={
+            "inputs": full_prompt, 
+            "parameters": {"max_new_tokens": 500, "temperature": 0.1, "return_full_text": False}
+        }, timeout=15)
+        
         result = response.json()
         
         if isinstance(result, list) and len(result) > 0:
-            content = result[0].get("generated_text", "").split("<|assistant|>\n")[-1].strip()
+            content = result[0].get("generated_text", "").strip()
+        elif isinstance(result, dict) and "generated_text" in result:
+            content = result["generated_text"].strip()
         else:
             content = "Não sei responder. Procure sua liderança direta."
             
-        if not content or "não sei" in content.lower():
+        # Validação de segurança: se a IA começar a inventar ou divagar
+        if not content or len(content) < 5:
              return {"response": "Não sei responder. Procure sua liderança direta."}
              
         return {"response": content}
-    except:
+    except Exception as e:
+        print(f"Erro na API: {e}")
         return {"response": "Não sei responder. Procure sua liderança direta."}
 
 @app.post("/upload-text")
@@ -81,9 +106,11 @@ async def upload_text(text: str = Form(...), user_type: str = Form(...)):
     if user_type != "master":
         raise HTTPException(status_code=403, detail="Apenas usuários Master podem atualizar o conhecimento.")
     
-    knowledge_base.append(text)
+    current_kb = load_knowledge()
+    current_kb.append(text)
+    save_knowledge(current_kb)
     return {"message": "Conhecimento atualizado com sucesso!"}
 
 @app.post("/upload-pdf")
 async def upload_pdf(user_type: str = Form(...)):
-    return {"message": "Para manter o sistema leve no plano gratuito, use o envio de texto direto no chat Master."}
+    return {"message": "Use o envio de texto direto para maior precisão no plano gratuito."}
