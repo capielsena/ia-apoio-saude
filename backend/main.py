@@ -7,6 +7,11 @@ from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 from pydantic import BaseModel
 from dotenv import load_dotenv
+import io
+try:
+    import pypdf
+except ImportError:
+    pypdf = None
 
 load_dotenv()
 
@@ -116,5 +121,26 @@ async def upload_text(text: str = Form(...), user_type: str = Form(...)):
     return {"message": "Conhecimento atualizado com sucesso!"}
 
 @app.post("/upload-pdf")
-async def upload_pdf(user_type: str = Form(...)):
-    return {"message": "Use o envio de texto direto para maior precisão no plano gratuito."}
+async def upload_pdf(file: UploadFile = File(...), user_type: str = Form(...)):
+    if user_type != "master":
+        raise HTTPException(status_code=403, detail="Apenas usuários Master podem atualizar o conhecimento.")
+    
+    if not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="Por favor, envie apenas arquivos PDF.")
+
+    try:
+        content = await file.read()
+        pdf_reader = pypdf.PdfReader(io.BytesIO(content))
+        text = ""
+        for page in pdf_reader.pages:
+            text += page.extract_text() + "\n"
+        
+        if not text.strip():
+            return {"message": "Não foi possível extrair texto deste PDF. Tente copiar e colar o texto."}
+
+        current_kb = load_knowledge()
+        current_kb.append(f"Arquivo: {file.filename}\nConteúdo:\n{text}")
+        save_knowledge(current_kb)
+        return {"message": f"PDF '{file.filename}' processado e adicionado ao conhecimento!"}
+    except Exception as e:
+        return {"message": f"Erro ao ler PDF: {str(e)}. Tente copiar e colar o texto."}
