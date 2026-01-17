@@ -1,19 +1,17 @@
 import os
-import requests
-import json
-from fastapi import FastAPI, Form, HTTPException
-from fastapi.middleware.cors import CORSMiddleware
+import uvicorn
+from fastapi import FastAPI, Request, UploadFile, File, Form, HTTPException
+from fastapi.responses import JSONResponse, FileResponse
 from fastapi.staticfiles import StaticFiles
-from fastapi.responses import FileResponse
+from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel
-from dotenv import load_dotenv
+import requests
 import io
 try:
     import pypdf
 except ImportError:
     pypdf = None
-
-load_dotenv()
+from supabase import create_client, Client
 
 app = FastAPI(title="IA de Apoio Operacional e Assistencial")
 
@@ -25,109 +23,84 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Caminho para salvar o conhecimento de forma persistente
-DATA_FILE = "/opt/render/project/src/data/knowledge.json"
-if not os.path.exists(os.path.dirname(DATA_FILE)):
-    os.makedirs(os.path.dirname(DATA_FILE), exist_ok=True)
+# Configurações do Supabase
+SUPABASE_URL = os.environ.get("SUPABASE_URL")
+SUPABASE_KEY = os.environ.get("SUPABASE_KEY")
+supabase: Client = create_client(SUPABASE_URL, SUPABASE_KEY)
 
-def load_knowledge():
-    if os.path.exists(DATA_FILE):
-        try:
-            with open(DATA_FILE, "r", encoding="utf-8") as f:
-                return json.load(f)
-        except:
-            return []
-    return []
+# Configuração da IA (Hugging Face)
+HF_API_URL = "https://api-inference.huggingface.co/models/HuggingFaceH4/zephyr-7b-beta"
+HF_TOKEN = os.environ.get("HUGGINGFACEHUB_API_TOKEN")
 
-def save_knowledge(data):
-    with open(DATA_FILE, "w", encoding="utf-8") as f:
-        json.dump(data, f, ensure_ascii=False, indent=4)
+class ChatRequest(BaseModel):
+    message: str
+    user_type: str
 
-# Carrega o conhecimento inicial
-knowledge_base = load_knowledge()
-
-# Servir arquivos estáticos do frontend
-if os.path.exists("./frontend"):
-    app.mount("/static", StaticFiles(directory="./frontend"), name="static")
+def get_all_knowledge():
+    try:
+        response = supabase.table("knowledge").select("content").execute()
+        return "\n---\n".join([item['content'] for item in response.data])
+    except Exception as e:
+        print(f"Erro ao buscar conhecimento: {e}")
+        return ""
 
 @app.get("/")
 async def read_index():
     return FileResponse("./frontend/index.html")
 
-SYSTEM_PROMPT = """Você é uma assistente virtual de apoio operacional e assistencial para uma equipe de saúde.
+@app.post("/chat")
+async def chat(req: ChatRequest):
+    knowledge = get_all_knowledge()
+    
+    system_prompt = f"""Você é uma assistente virtual de apoio operacional e assistencial para uma equipe de saúde.
 Sua personalidade é profissional, educada e prestativa.
 
 DIRETRIZES DE RESPOSTA:
 1. SAUDAÇÕES: Se o usuário disser "Oi", "Olá", "Bom dia" ou fizer interações sociais básicas, responda de forma cordial e se coloque à disposição para ajudar com dúvidas sobre os protocolos.
 2. DÚVIDAS TÉCNICAS: Para perguntas sobre exames, horários, locais ou procedimentos, use APENAS o contexto fornecido abaixo.
 3. REGRA DE OURO: Se a pergunta for sobre um procedimento ou regra que NÃO consta no contexto abaixo, você deve responder EXATAMENTE: "Não sei responder. Procure sua liderança direta."
-4. Não invente informações. Seja objetiva."""
+4. Não invente informações. Seja objetiva.
 
-class ChatMessage(BaseModel):
-    message: str
-    user_type: str
+CONTEXTO CADASTRADO:
+{knowledge}"""
 
-@app.post("/chat")
-async def chat(payload: ChatMessage):
-    query = payload.message
-    current_kb = load_knowledge()
-    
-    # Busca de contexto: pega tudo o que foi cadastrado para garantir que a IA tenha acesso
-    # Como são textos curtos de manuais, podemos enviar tudo como contexto para a IA decidir
-    context = "\n---\n".join(current_kb)
-    
-    if not context:
-        return {"response": "Não sei responder. Procure sua liderança direta."}
+    full_prompt = f"<|system|>\n{system_prompt}</s>\n<|user|>\n{req.message}</s>\n<|assistant|>\n"
 
-    # Chamada para API da Hugging Face
-    api_url = "https://api-inference.huggingface.co/models/HuggingFaceH4/zephyr-7b-beta"
-    headers = {"Authorization": f"Bearer {os.getenv('HUGGINGFACEHUB_API_TOKEN')}"}
-    
-    # Prompt estruturado para forçar o uso do contexto
-    full_prompt = f"<|system|>\n{SYSTEM_PROMPT}\n\nCONTEXTO CADASTRADO:\n{context}</s>\n<|user|>\n{query}</s>\n<|assistant|>\n"
+    headers = {"Authorization": f"Bearer {HF_TOKEN}"}
+    payload = {
+        "inputs": full_prompt,
+        "parameters": {"max_new_tokens": 500, "temperature": 0.1, "return_full_text": False}
+    }
     
     try:
-        response = requests.post(api_url, headers=headers, json={
-            "inputs": full_prompt, 
-            "parameters": {"max_new_tokens": 500, "temperature": 0.1, "return_full_text": False}
-        }, timeout=15)
-        
+        response = requests.post(HF_API_URL, headers=headers, json=payload)
         result = response.json()
         
         if isinstance(result, list) and len(result) > 0:
-            content = result[0].get("generated_text", "").strip()
+            answer = result[0].get("generated_text", "").strip()
         elif isinstance(result, dict) and "generated_text" in result:
-            content = result["generated_text"].strip()
+            answer = result["generated_text"].strip()
         else:
-            content = "Não sei responder. Procure sua liderança direta."
-            
-        # Validação de segurança: se a IA começar a inventar ou divagar
-        if not content or len(content) < 5:
-             return {"response": "Não sei responder. Procure sua liderança direta."}
-             
-        return {"response": content}
+            answer = "Não sei responder. Procure sua liderança direta."
+
+        return {"response": answer}
     except Exception as e:
-        print(f"Erro na API: {e}")
         return {"response": "Não sei responder. Procure sua liderança direta."}
 
 @app.post("/upload-text")
 async def upload_text(text: str = Form(...), user_type: str = Form(...)):
     if user_type != "master":
-        raise HTTPException(status_code=403, detail="Apenas usuários Master podem atualizar o conhecimento.")
-    
-    current_kb = load_knowledge()
-    current_kb.append(text)
-    save_knowledge(current_kb)
-    return {"message": "Conhecimento atualizado com sucesso!"}
+        raise HTTPException(status_code=403, detail="Acesso negado.")
+    try:
+        supabase.table("knowledge").insert({"content": text}).execute()
+        return {"message": "Conhecimento atualizado com sucesso!"}
+    except Exception as e:
+        return {"message": f"Erro ao salvar: {str(e)}"}
 
 @app.post("/upload-pdf")
 async def upload_pdf(file: UploadFile = File(...), user_type: str = Form(...)):
     if user_type != "master":
-        raise HTTPException(status_code=403, detail="Apenas usuários Master podem atualizar o conhecimento.")
-    
-    if not file.filename.lower().endswith(".pdf"):
-        raise HTTPException(status_code=400, detail="Por favor, envie apenas arquivos PDF.")
-
+        raise HTTPException(status_code=403, detail="Acesso negado.")
     try:
         content = await file.read()
         pdf_reader = pypdf.PdfReader(io.BytesIO(content))
@@ -135,12 +108,17 @@ async def upload_pdf(file: UploadFile = File(...), user_type: str = Form(...)):
         for page in pdf_reader.pages:
             text += page.extract_text() + "\n"
         
-        if not text.strip():
-            return {"message": "Não foi possível extrair texto deste PDF. Tente copiar e colar o texto."}
-
-        current_kb = load_knowledge()
-        current_kb.append(f"Arquivo: {file.filename}\nConteúdo:\n{text}")
-        save_knowledge(current_kb)
-        return {"message": f"PDF '{file.filename}' processado e adicionado ao conhecimento!"}
+        if text.strip():
+            supabase.table("knowledge").insert({"content": text}).execute()
+            return {"message": f"PDF '{file.filename}' processado com sucesso!"}
+        return {"message": "PDF sem texto legível."}
     except Exception as e:
-        return {"message": f"Erro ao ler PDF: {str(e)}. Tente copiar e colar o texto."}
+        return {"message": f"Erro ao ler PDF: {str(e)}"}
+
+# Servir arquivos estáticos
+if os.path.exists("./frontend"):
+    app.mount("/static", StaticFiles(directory="./frontend"), name="static")
+
+if __name__ == "__main__":
+    port = int(os.environ.get("PORT", 8000))
+    uvicorn.run(app, host="0.0.0.0", port=port)
